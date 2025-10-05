@@ -6,8 +6,9 @@ import (
 	"log"
 	"strings"
 
-	"github.com/mark3labs/mcp-go/mcp"
 	"callgraph-mcp/handlers"
+
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 func main() {
@@ -21,7 +22,7 @@ func main() {
 				"moduleArgs": []string{"./tests/fixtures/simple"},
 				"algo":       "static",
 				"nostd":      true,
-				"group":      "pkg",
+				"group":      []string{"pkg"},
 			},
 		},
 	}
@@ -52,7 +53,7 @@ func main() {
 				"moduleArgs": []string{"./tests/fixtures/simple"},
 				"algo":       "static",
 				"nostd":      true,
-				"group":      "pkg",
+				"group":      []string{"pkg"},
 				"symbol":     "hello",
 				"direction":  "upstream",
 			},
@@ -72,7 +73,7 @@ func main() {
 				"moduleArgs": []string{"./tests/fixtures/simple"},
 				"algo":       "static",
 				"nostd":      true,
-				"group":      "pkg",
+				"group":      []string{"pkg"},
 				"symbol":     "goodbye",
 				"direction":  "upstream",
 			},
@@ -95,7 +96,7 @@ func main() {
 					"moduleArgs": []string{"./tests/fixtures/simple"},
 					"algo":       a,
 					"nostd":      true,
-					"group":      "pkg",
+					"group":      []string{"pkg"},
 					"symbol":     "main.main",
 					"direction":  "downstream",
 				},

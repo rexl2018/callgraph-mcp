@@ -56,22 +56,21 @@ type analysis struct {
 
 // MCPCallgraphRequest represents the input parameters for the callgraph tool via MCP
 type MCPCallgraphRequest struct {
-	ModuleArgs []string `json:"moduleArgs"`           // Package/module arguments (e.g., "./...")
-	Dir        string   `json:"dir,omitempty"`        // Working directory
-	Focus      string   `json:"focus,omitempty"`      // Focus specific package
-	Group      string   `json:"group,omitempty"`      // Grouping functions by packages and/or types
-	Limit      string   `json:"limit,omitempty"`      // Limit package paths to given prefixes
-	Ignore     string   `json:"ignore,omitempty"`     // Ignore package paths containing given prefixes
-	Include    string   `json:"include,omitempty"`    // Include package paths with given prefixes
-	NoStd      bool     `json:"nostd,omitempty"`      // Omit calls to/from packages in standard library
-	NoInter    bool     `json:"nointer,omitempty"`    // Omit calls to unexported functions
-	Tests      bool     `json:"tests,omitempty"`      // Include test code
-	Algo       string   `json:"algo,omitempty"`       // Algorithm: static, cha, rta
-	Tags       []string `json:"tags,omitempty"`       // Build tags
-	Debug      bool     `json:"debug,omitempty"`      // Enable verbose log
-	// New fields for symbol-based traversal
-	Symbol    string `json:"symbol,omitempty"`        // Starting function symbol, e.g. "main.main"
-	Direction string `json:"direction,omitempty"`     // Traversal direction: upstream|downstream|both (default: downstream)
+	ModuleArgs []string `json:"moduleArgs"`
+	Dir        string   `json:"dir,omitempty"`
+	Focus      string   `json:"focus,omitempty"`
+	Group      []string `json:"group,omitempty"`
+	LimitKeyword []string `json:"limit_keyword,omitempty"`
+	LimitPrefix  []string `json:"limit_prefix,omitempty"`
+	Ignore     []string `json:"ignore,omitempty"`
+	NoStd      bool     `json:"nostd,omitempty"`
+	NoInter    bool     `json:"nointer,omitempty"`
+	Tests      bool     `json:"tests,omitempty"`
+	Algo       string   `json:"algo,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	Debug      bool     `json:"debug,omitempty"`
+	Symbol    string `json:"symbol,omitempty"`
+	Direction string `json:"direction,omitempty"`
 }
 
 // MCPCallgraphResponse represents the output of the callgraph tool via MCP
@@ -85,9 +84,9 @@ type MCPCallgraphResponse struct {
 }
 
 type MCPCallgraphFilters struct {
-	Limit   []string `json:"limit"`
+	Limit   []string `json:"limit_keyword"`
 	Ignore  []string `json:"ignore"`
-	Include []string `json:"include"`
+	Include []string `json:"limit_prefix"`
 	NoStd   bool     `json:"nostd"`
 	NoInter bool     `json:"nointer"`
 	Group   []string `json:"group"`
@@ -163,17 +162,29 @@ func HandleCallgraphRequest(ctx context.Context, request mcp.CallToolRequest) (*
 	// Unified tool: when symbol is provided, perform directional traversal; otherwise, generate package-level callgraph
 	// Set defaults
 	if req.Algo == "" {
-		req.Algo = "static"
+	    req.Algo = "static"
 	}
-	if req.Group == "" {
-		req.Group = "pkg"
+	if len(req.Group) == 0 {
+	    req.Group = []string{"pkg"}
 	}
 
 	// Set debug flag
 	if req.Debug {
-		*debugFlag = true
+	    *debugFlag = true
 	}
 
+	// Apply default values for boolean fields to match schema defaults
+	// Note: Go's zero value for bool is false, but our schema defaults are different
+	if args, ok := request.Params.Arguments.(map[string]interface{}); ok {
+	    // Check if nostd was explicitly provided in the request
+	    if _, exists := args["nostd"]; !exists {
+	        req.NoStd = true  // Schema default is true
+	    }
+	    // Check if nointer was explicitly provided in the request
+	    if _, exists := args["nointer"]; !exists {
+	        req.NoInter = true  // Schema default is true
+	    }
+	}
 	// Map MCP request to internal analysis options
 	opts := mapMCPRequestToRenderOpts(req)
 	
@@ -253,14 +264,14 @@ func HandleCallgraphRequest(ctx context.Context, request mcp.CallToolRequest) (*
 // mapMCPRequestToRenderOpts converts MCP request to internal renderOpts
 func mapMCPRequestToRenderOpts(req MCPCallgraphRequest) *renderOpts {
 	return &renderOpts{
-		cacheDir: "", // Not used in MCP mode
+		cacheDir: "",
 		focus:    req.Focus,
-		group:    []string{req.Group},
-		ignore:   []string{req.Ignore},
-		include:  []string{req.Include},
-		limit:    []string{req.Limit},
+		group:    req.Group,
+		ignore:   req.Ignore,
+		include:  req.LimitPrefix,
+		limit:    req.LimitKeyword,
 		nointer:  req.NoInter,
-		refresh:  false, // Not used in MCP mode
+		refresh:  false,
 		nostd:    req.NoStd,
 		algo:     CallGraphType(req.Algo),
 	}
@@ -393,7 +404,8 @@ func (a *analysis) ProcessListArgs() (e error) {
 	var includePaths []string
 	var limitPaths []string
 
-	for _, g := range strings.Split(a.opts.group[0], ",") {
+	// Process group array - validate each item
+	for _, g := range a.opts.group {
 		g := strings.TrimSpace(g)
 		if g == "" {
 			continue
@@ -405,21 +417,24 @@ func (a *analysis) ProcessListArgs() (e error) {
 		groupBy = append(groupBy, g)
 	}
 
-	for _, p := range strings.Split(a.opts.ignore[0], ",") {
+	// Process ignore array - trim each item
+	for _, p := range a.opts.ignore {
 		p = strings.TrimSpace(p)
 		if p != "" {
 			ignorePaths = append(ignorePaths, p)
 		}
 	}
 
-	for _, p := range strings.Split(a.opts.include[0], ",") {
+	// Process include array - trim each item
+	for _, p := range a.opts.include {
 		p = strings.TrimSpace(p)
 		if p != "" {
 			includePaths = append(includePaths, p)
 		}
 	}
 
-	for _, p := range strings.Split(a.opts.limit[0], ",") {
+	// Process limit array - trim each item
+	for _, p := range a.opts.limit {
 		p = strings.TrimSpace(p)
 		if p != "" {
 			limitPaths = append(limitPaths, p)
@@ -501,7 +516,7 @@ func isStdPkgPath(path string) bool {
 
 // isInternalPkg checks if a package is an internal runtime package
 func isInternalPkg(path string) bool {
-	return strings.HasPrefix(path, "internal/") || 
+	return strings.HasPrefix(path, "internal/") ||
 		   strings.Contains(path, "/internal/") ||
 		   path == "runtime" ||
 		   strings.HasPrefix(path, "runtime/") ||
@@ -567,33 +582,42 @@ func generateMermaidCallgraph(a *analysis) (string, MCPCallgraphStats, error) {
 	}
 
 	var inIncludes = func(node *callgraph.Node) bool {
-		pkgPath := node.Func.Pkg.Pkg.Path()
-		for _, p := range a.opts.include {
-			if strings.HasPrefix(pkgPath, p) {
-				return true
-			}
-		}
-		return false
+	    if node == nil || node.Func == nil || node.Func.Pkg == nil || node.Func.Pkg.Pkg == nil {
+	        return false
+	    }
+	    pkgPath := node.Func.Pkg.Pkg.Path()
+	    for _, p := range a.opts.include {
+	        if strings.HasPrefix(pkgPath, p) {
+	            return true
+	        }
+	    }
+	    return false
 	}
 
 	var inLimits = func(node *callgraph.Node) bool {
-		pkgPath := node.Func.Pkg.Pkg.Path()
-		for _, p := range a.opts.limit {
-			if strings.HasPrefix(pkgPath, p) {
-				return true
-			}
-		}
-		return false
+	    if node == nil || node.Func == nil || node.Func.Pkg == nil || node.Func.Pkg.Pkg == nil {
+	        return false
+	    }
+	    pkgPath := node.Func.Pkg.Pkg.Path()
+	    for _, p := range a.opts.limit {
+	        if strings.Contains(pkgPath, p) {
+	            return true
+	        }
+	    }
+	    return false
 	}
 
 	var inIgnores = func(node *callgraph.Node) bool {
-		pkgPath := node.Func.Pkg.Pkg.Path()
-		for _, p := range a.opts.ignore {
-			if strings.Contains(pkgPath, p) {
-				return true
-			}
-		}
-		return false
+	    if node == nil || node.Func == nil || node.Func.Pkg == nil || node.Func.Pkg.Pkg == nil {
+	        return false
+	    }
+	    pkgPath := node.Func.Pkg.Pkg.Path()
+	    for _, p := range a.opts.ignore {
+	        if strings.Contains(pkgPath, p) {
+	            return true
+	        }
+	    }
+	    return false
 	}
 
 	// Traverse callgraph and populate nodes/edges
@@ -611,13 +635,26 @@ func generateMermaidCallgraph(a *analysis) (string, MCPCallgraphStats, error) {
 			}
 			
 			// Also filter internal runtime packages when nostd is true
-			if a.opts.nostd && (isInternalPkg(caller.Func.Pkg.Pkg.Path()) || isInternalPkg(callee.Func.Pkg.Pkg.Path())) {
-				continue
+			if a.opts.nostd {
+			    var callerPath, calleePath string
+			    if caller != nil && caller.Func != nil && caller.Func.Pkg != nil && caller.Func.Pkg.Pkg != nil {
+			        callerPath = caller.Func.Pkg.Pkg.Path()
+			    }
+			    if callee != nil && callee.Func != nil && callee.Func.Pkg != nil && callee.Func.Pkg.Pkg != nil {
+			        calleePath = callee.Func.Pkg.Pkg.Path()
+			    }
+			    if isInternalPkg(callerPath) || isInternalPkg(calleePath) {
+			        continue
+			    }
 			}
-			if a.opts.nointer && (!caller.Func.Object().Exported() || !callee.Func.Object().Exported()) {
-				continue
+			if a.opts.nointer {
+			    cObj := caller.Func.Object()
+			    dObj := callee.Func.Object()
+			    if cObj == nil || dObj == nil || !cObj.Exported() || !dObj.Exported() {
+			        continue
+			    }
 			}
-			if len(a.opts.include) > 0 && !(inIncludes(caller) || inIncludes(callee)) {
+			if len(a.opts.include) > 0 && !(inIncludes(caller) && inIncludes(callee)) {
 				continue
 			}
 			if len(a.opts.limit) > 0 && !(inLimits(caller) || inLimits(callee)) {
@@ -687,10 +724,14 @@ func generateMermaidCallgraph(a *analysis) (string, MCPCallgraphStats, error) {
 	// Helper to write a single node line and its file:line comment
 	writeNode := func(id string, n *MCPCallgraphNode) {
 		mid := sanitizeMermaidID(id)
-		label := fmt.Sprintf("%s<br/>%s", n.Func, n.PackageName)
+		label := fmt.Sprintf("%s<br/>%s:%d", n.Func, n.File, n.Line)
 		sb.WriteString(fmt.Sprintf("%s[%q]\n", mid, label))
-		// Append file:line as a Mermaid comment
-		sb.WriteString(fmt.Sprintf("%%%% %s:%d\n", n.File, n.Line))
+		// Append relative path as a Mermaid comment
+		relPath := "./"
+		if n.File != "" {
+			relPath = "./" + n.File
+		}
+		sb.WriteString(fmt.Sprintf("%%%% %s\n", relPath))
 	}
 
 	if hasPkg && hasType {
@@ -879,7 +920,7 @@ func generateMermaidTraversal(a *analysis, symbol string, direction string) (str
 	inLimits := func(node *callgraph.Node) bool {
 		pkgPath := node.Func.Pkg.Pkg.Path()
 		for _, p := range a.opts.limit {
-			if strings.HasPrefix(pkgPath, p) {
+			if strings.Contains(pkgPath, p) {
 				return true
 			}
 		}
@@ -909,7 +950,7 @@ func generateMermaidTraversal(a *analysis, symbol string, direction string) (str
 		if a.opts.nointer && (!caller.Func.Object().Exported() || !callee.Func.Object().Exported()) {
 			return false
 		}
-		if len(a.opts.include) > 0 && !(inIncludes(caller) || inIncludes(callee)) {
+		if len(a.opts.include) > 0 && !(inIncludes(caller) && inIncludes(callee)) {
 			return false
 		}
 		if len(a.opts.limit) > 0 && !(inLimits(caller) || inLimits(callee)) {
@@ -1028,9 +1069,14 @@ func generateMermaidTraversal(a *analysis, symbol string, direction string) (str
 	}
 	writeNode := func(id string, n *MCPCallgraphNode) {
 		mid := sanitizeMermaidID(id)
-		label := fmt.Sprintf("%s<br/>%s", n.Func, n.PackageName)
+		label := fmt.Sprintf("%s<br/>%s:%d", n.Func, n.File, n.Line)
 		sb.WriteString(fmt.Sprintf("%s[%q]\n", mid, label))
-		sb.WriteString(fmt.Sprintf("%%%% %s:%d\n", n.File, n.Line))
+		// Append relative path as a Mermaid comment
+		relPath := "./"
+		if n.File != "" {
+			relPath = "./" + n.File
+		}
+		sb.WriteString(fmt.Sprintf("%%%% %s\n", relPath))
 	}
 	if hasPkg && hasType {
 		nested := make(map[string]map[string][]string)

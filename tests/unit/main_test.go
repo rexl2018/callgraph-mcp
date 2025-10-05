@@ -63,7 +63,7 @@ func TestCallgraphWithGrouping(t *testing.T) {
 				"moduleArgs": []string{"../fixtures/simple"},
 				"algo":       "static",
 				"nostd":      false,
-				"group":      "pkg",
+				"group":      []string{"pkg"},
 			},
 		},
 	}
@@ -91,10 +91,10 @@ func TestMCPCallgraphTypes(t *testing.T) {
 		Focus:      "main",
 		NoStd:      true,
 		NoInter:    false,
-		Group:      "pkg,type",
-		Limit:      "github.com/test",
-		Ignore:     "vendor",
-		Include:    "internal",
+		Group:      []string{"pkg", "type"},
+		LimitKeyword: []string{"github.com/test"},
+		Ignore:     []string{"vendor"},
+		LimitPrefix: []string{"internal"},
 	}
 
 	data, err := json.Marshal(req)
@@ -119,7 +119,7 @@ func TestSymbolCallsBasic(t *testing.T) {
 				"moduleArgs": []string{"../fixtures/simple"},
 				"algo":       "static",
 				"nostd":      true,
-				"group":      "pkg",
+				"group":      []string{"pkg"},
 				"symbol":     "main.main",
 				"direction":  "downstream",
 			},
@@ -164,7 +164,7 @@ func TestSymbolCallsUpstream(t *testing.T) {
 				"moduleArgs": []string{"../fixtures/simple"},
 				"algo":       "static",
 				"nostd":      true,
-				"group":      "pkg",
+				"group":      []string{"pkg"},
 				"symbol":     "hello",
 				"direction":  "upstream",
 			},
@@ -189,13 +189,18 @@ func TestSymbolCallsUpstream(t *testing.T) {
 func TestSymbolCallsRequestTypes(t *testing.T) {
 	// Test MCPCallgraphRequest with symbol and direction fields
 	req := handlers.MCPCallgraphRequest{
-		ModuleArgs: []string{"./test"},
-		Algo:       "static",
-		NoStd:      true,
-		Group:      "pkg",
-		Symbol:     "main.main",
-		Direction:  "downstream",
-	}
+	ModuleArgs: []string{"./test"},
+	Algo:       "static",
+	Focus:      "main",
+	NoStd:      true,
+	NoInter:    false,
+	Group:      []string{"pkg", "type"},
+	LimitKeyword: []string{"github.com/test"},
+	Ignore:     []string{"vendor"},
+	LimitPrefix: []string{"internal"},
+	Symbol:     "main.main",
+	Direction:  "downstream",
+}
 
 	data, err := json.Marshal(req)
 	if err != nil {

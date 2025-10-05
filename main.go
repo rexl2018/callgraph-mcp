@@ -21,13 +21,13 @@ func main() {
 	// Create a new MCP server
 	mcpServer := server.NewMCPServer(
 		"callgraph-mcp",
-		"1.0.0",
+		"1.0.1",
 	)
 
 	// Register the unified callHierarchy tool
 	mcpServer.AddTool(mcp.Tool{
 		Name:        "callHierarchy",
-		Description: "Generate call hierarchy for Go packages/functions in Mermaid format",
+		Description: "Generate call hierarchy for Go packages/functions in Mermaid format\nExample (package-level):\n{\n  \"dir\": \"/path/to/project/parent/dir/project_name\",\n  \"limit_keyword\": [\"project_name\"],\n  \"moduleArgs\": [\"./...\"]\n}\nExample (through specific function - add these two lines):\n  \"symbol\": \"main.main\",\n  \"direction\": \"downstream\"",
 		InputSchema: mcp.ToolInputSchema{
 			Type: "object",
 			Properties: map[string]interface{}{
@@ -38,28 +38,35 @@ func main() {
 				},
 				"dir": map[string]interface{}{
 					"type":        "string",
-					"description": "Working directory for resolving relative package paths (defaults to current directory)",
+					"description": "Working directory for resolving relative package paths (must be absolute path, mandatory for working on local codebase)",
 				},
 				"focus": map[string]interface{}{
 					"type":        "string",
 					"description": "Focus specific package using name or import path",
 				},
 				"group": map[string]interface{}{
-					"type":        "string",
-					"description": "Grouping functions by packages and/or types [pkg,type] (separated by comma)",
-					"default":     "pkg",
+					"type":        "array",
+					"items":       map[string]string{"type": "string"},
+					"description": "Grouping functions by packages and/or types [pkg,type]",
+					"default":     []string{"pkg"},
 				},
-				"limit": map[string]interface{}{
-					"type":        "string",
-					"description": "Limit package paths to given prefixes (separated by comma)",
+				"limit_keyword": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]string{"type": "string"},
+					"description": "Limit package paths which has given keywords, normally it is the project name",
+					"default":     []string{},
 				},
 				"ignore": map[string]interface{}{
-					"type":        "string",
-					"description": "Ignore package paths containing given prefixes (separated by comma)",
+					"type":        "array",
+					"items":       map[string]string{"type": "string"},
+					"description": "Ignore package paths containing given prefixes",
+					"default":     []string{},
 				},
-				"include": map[string]interface{}{
-					"type":        "string",
-					"description": "Include package paths with given prefixes (separated by comma)",
+				"limit_prefix": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]string{"type": "string"},
+					"description": "Limit by import path prefixes (caller AND callee must match)",
+					"default":     []string{},
 				},
 				"nostd": map[string]interface{}{
 					"type":        "boolean",
@@ -113,10 +120,23 @@ func main() {
 		log.SetOutput(os.Stderr) // For now, always log to stderr for debugging
 	}
 
-	log.Printf("Starting callgraph-mcp server...")
-
-	// Start the server using stdio transport
-	if err := server.ServeStdio(mcpServer); err != nil {
-		log.Fatalf("Server error: %v", err)
-	}
+	// Choose transport based on environment
+    transport := os.Getenv("MCP_TRANSPORT")
+    if transport == "sse" {
+        addr := os.Getenv("MCP_ADDR")
+        if addr == "" {
+            addr = ":11156"
+        }
+        log.Printf("Starting callgraph-mcp SSE server on %s", addr)
+        sseServer := server.NewSSEServer(mcpServer)
+        if err := sseServer.Start(addr); err != nil {
+            log.Fatalf("Server error: %v", err)
+        }
+    } else {
+        log.Printf("Starting callgraph-mcp stdio server...")
+        if err := server.ServeStdio(mcpServer); err != nil {
+            log.Fatalf("Server error: %v", err)
+        }
+    }
 }
+// Remove old 'include' property entirely per request

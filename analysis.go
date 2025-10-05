@@ -88,7 +88,7 @@ func (a *analysis) DoAnalysis(
 	logf("loaded %d initial packages, building program", len(initial))
 
 	// Create and build SSA-form program representation.
-	mode := ssa.InstantiateGenerics
+	mode := ssa.BuilderMode(0) // default builder mode (avoid heavy generic instantiation)
 	prog, pkgs := ssautil.AllPackages(initial, mode)
 	
 	prog.Build()
@@ -122,9 +122,44 @@ func (a *analysis) DoAnalysis(
 			roots = append(roots, init)
 		}
 
-		graph = rta.Analyze(roots, true).CallGraph
+		// Disable reflection to keep graph small when requested
+		useReflect := false
+		graph = rta.Analyze(roots, useReflect).CallGraph
 	default:
 		return fmt.Errorf("invalid call graph type: %s", algo)
+	}
+
+	// isStdPkgPath checks if a package path is standard library (duplicated here for pruning purposes)
+	// If nostd is requested, prune std nodes/edges from graph immediately to reduce memory retention
+	if a.opts != nil && a.opts.nostd {
+		pruned := &callgraph.Graph{Nodes: make(map[*ssa.Function]*callgraph.Node)}
+		nodeMap := make(map[*callgraph.Node]*callgraph.Node)
+		for _, n := range graph.Nodes {
+			keep := true
+			if n != nil && n.Func != nil && n.Func.Pkg != nil && n.Func.Pkg.Pkg != nil {
+				path := n.Func.Pkg.Pkg.Path()
+				if isStdPkgPath(path) {
+					keep = false
+				}
+			}
+			if !keep {
+				continue
+			}
+			newN := pruned.CreateNode(n.Func)
+			nodeMap[n] = newN
+		}
+		for _, n := range graph.Nodes {
+			if nodeMap[n] == nil {
+				continue
+			}
+			for _, e := range n.Out {
+				if nodeMap[e.Callee] == nil {
+					continue
+				}
+				callgraph.AddEdge(nodeMap[n], e.Site, nodeMap[e.Callee])
+			}
+		}
+		graph = pruned
 	}
 
 	logf("callgraph resolved with %d nodes", len(graph.Nodes))

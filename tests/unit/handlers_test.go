@@ -13,10 +13,10 @@ func TestMCPRequestMapping(t *testing.T) {
 		Focus:      "main",
 		NoStd:      true,
 		NoInter:    false,
-		Group:      "pkg,type",
-		Limit:      "github.com/test",
-		Ignore:     "vendor",
-		Include:    "internal",
+		Group:      []string{"pkg", "type"},
+		LimitKeyword: []string{"github.com/test"},
+		Ignore:     []string{"vendor"},
+		LimitPrefix: []string{"internal"},
 	}
 
 	// Note: This function needs to be exported from handlers package
