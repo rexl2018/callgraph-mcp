@@ -7,7 +7,7 @@ BUILD_DATE ?= $(shell date +%s)
 BUILD_HOST ?= $(shell hostname)
 BUILD_USER ?= $(shell id -un)
 
-PROJECT := go-callvis
+PROJECT := callgraph-mcp
 BUILD_DIR ?= .build
 
 GOOS ?= $(shell go env GOOS)
@@ -37,13 +37,13 @@ export DOCKER_BUILDKIT=1
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
-build:  ## Build go-callvis
+build:  ## Build callgraph-mcp
 	go build -v -tags $(GO_BUILD_TAGS) -ldflags "$(GO_LDFLAGS)" $(GO_BUILD_ARGS)
 
 test:  ## Run unit tests
 	go test -tags $(GO_BUILD_TAGS) -ldflags "$(GO_LDFLAGS)" $(GO_BUILD_ARGS) -short -race ./...
 
-install:  ## Install go-callvis
+install:  ## Install callgraph-mcp
 	go install -tags $(GO_BUILD_TAGS) -ldflags "$(GO_LDFLAGS)" $(GO_BUILD_ARGS)
 
 $(BUILD_DIR)/$(PROJECT): $(BUILD_DIR)/$(PROJECT)-$(GOOS)-$(GOARCH)
@@ -62,7 +62,7 @@ $(BUILD_DIR):
 
 cross: $(foreach platform, $(PLATFORMS), $(BUILD_DIR)/$(PROJECT)-$(platform).sha256)
 
-release: cross  ## Release go-callvis
+release: cross  ## Release callgraph-mcp
 	ls -hl $(BUILD_DIR)
 
 clean:  ## Clean build directory
