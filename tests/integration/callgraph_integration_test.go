@@ -13,7 +13,7 @@ func TestCallgraphToolIntegration(t *testing.T) {
 	// Test basic functionality with real code
 	request := mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
-			Name: "callgraph",
+			Name: "callHierarchy",
 			Arguments: map[string]interface{}{
 				"moduleArgs": []string{"../fixtures/simple"},
 				"algo":       "static",
@@ -54,7 +54,7 @@ func TestCallgraphToolWithDifferentAlgorithms(t *testing.T) {
 		t.Run(algo, func(t *testing.T) {
 			request := mcp.CallToolRequest{
 				Params: mcp.CallToolParams{
-					Name: "callgraph",
+					Name: "callHierarchy",
 					Arguments: map[string]interface{}{
 						"moduleArgs": []string{"../fixtures/simple"},
 						"algo":       algo,
@@ -97,7 +97,7 @@ func TestCallgraphToolErrorHandling(t *testing.T) {
 			name: "missing moduleArgs",
 			request: mcp.CallToolRequest{
 				Params: mcp.CallToolParams{
-					Name: "callgraph",
+					Name: "callHierarchy",
 					Arguments: map[string]interface{}{
 						"algo":  "static",
 						"nostd": true,
@@ -110,10 +110,120 @@ func TestCallgraphToolErrorHandling(t *testing.T) {
 			name: "invalid algorithm",
 			request: mcp.CallToolRequest{
 				Params: mcp.CallToolParams{
-					Name: "callgraph",
+					Name: "callHierarchy",
 					Arguments: map[string]interface{}{
 						"moduleArgs": []string{"../fixtures/simple"},
 						"algo":       "invalid",
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := handlers.HandleCallgraphRequest(context.Background(), tt.request)
+			if tt.wantErr {
+				if err == nil && (result == nil || !result.IsError) {
+					t.Error("expected error but got none")
+				}
+			} else {
+				if err != nil || result == nil || result.IsError {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestSymbolCallsToolIntegration(t *testing.T) {
+	// Test basic symbol_calls functionality
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "callHierarchy",
+			Arguments: map[string]interface{}{
+				"moduleArgs": []string{"../fixtures/simple"},
+				"algo":       "static",
+				"nostd":      true,
+				"symbol":     "main.main",
+				"direction":  "downstream",
+			},
+		},
+	}
+
+	result, err := handlers.HandleCallgraphRequest(context.Background(), request)
+	if err != nil {
+		t.Fatalf("HandleCallgraphRequest failed: %v", err)
+	}
+
+	if result == nil {
+		t.Fatal("result is nil")
+	}
+
+	if len(result.Content) == 0 {
+		t.Fatal("result content is empty")
+	}
+
+	// Validate Mermaid flowchart string
+	textContent, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatal("result content is not TextContent")
+	}
+	if text := textContent.Text; text == "" {
+		t.Fatal("Mermaid output is empty")
+	} else if !(len(text) >= 10 && text[:10] == "flowchart ") {
+		t.Fatalf("Mermaid output does not start with 'flowchart ': %q", text[:10])
+	}
+}
+
+func TestSymbolCallsErrorHandling(t *testing.T) {
+	tests := []struct {
+		name    string
+		request mcp.CallToolRequest
+		wantErr bool
+	}{
+		{
+			name: "missing symbol",
+			request: mcp.CallToolRequest{
+				Params: mcp.CallToolParams{
+					Name: "callHierarchy",
+					Arguments: map[string]interface{}{
+						"moduleArgs": []string{"../fixtures/simple"},
+						"algo":       "static",
+						"nostd":      true,
+						"direction":  "downstream",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid symbol",
+			request: mcp.CallToolRequest{
+				Params: mcp.CallToolParams{
+					Name: "callHierarchy",
+					Arguments: map[string]interface{}{
+						"moduleArgs": []string{"../fixtures/simple"},
+						"algo":       "static",
+						"nostd":      true,
+						"symbol":     "nonexistent.function",
+						"direction":  "downstream",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing moduleArgs",
+			request: mcp.CallToolRequest{
+				Params: mcp.CallToolParams{
+					Name: "callHierarchy",
+					Arguments: map[string]interface{}{
+						"algo":      "static",
+						"nostd":     true,
+						"symbol":    "main.main",
+						"direction": "downstream",
 					},
 				},
 			},

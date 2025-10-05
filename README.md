@@ -28,39 +28,63 @@ callgraph-mcp 主要设计为 MCP 服务器使用。启动服务器：
 
 ### MCP 工具调用
 
-服务器提供一个名为 `callgraph` 的工具，支持以下参数：
+服务器提供一个统一的工具：
 
-#### 必需参数
+#### callHierarchy - 调用层级生成
+
+- 不指定 `symbol`：生成指定包的完整调用图（Mermaid 格式）
+- 指定 `symbol`：从符号出发按方向遍历（upstream/downstream/both），生成调用图
+
+**必需参数**：
 - `moduleArgs` ([]string): 要分析的包路径，例如 `["./..."]` 或 `["./cmd/myapp"]`
 
-#### 可选参数
+**可选参数**：
 - `algo` (string): 分析算法，可选值：`static`（默认）、`cha`、`rta`
-- `dir` (string): 工作目录
+- `dir` (string): 工作目录，用于解析相对路径，默认当前目录
 - `focus` (string): 聚焦特定包（按名称或导入路径）
 - `group` (string): 分组方式，可选值：`pkg`（默认）、`type`，用逗号分隔
-- `limit` (string): 限制包路径前缀，用逗号分隔
-- `ignore` (string): 忽略包路径前缀，用逗号分隔
-- `include` (string): 包含包路径前缀，用逗号分隔
-- `nostd` (boolean): 忽略标准库调用
-- `nointer` (boolean): 忽略未导出函数调用
-- `tests` (boolean): 包含测试代码
-- `tags` ([]string): 构建标签
-- `debug` (boolean): 启用详细日志
+- `limit`/`ignore`/`include` (string): 包路径过滤（逗号分隔前缀）
+- `nostd` (boolean): 忽略标准库调用（默认 `true`）
+- `nointer` (boolean): 忽略未导出函数调用（默认 `true`）
+- `tests` (boolean): 包含测试代码（默认 `false`）
+- `tags` ([]string): 构建标签（默认空）
+- `debug` (boolean): 启用详细日志（默认 `false`）
+- `symbol` (string): 起始函数符号，例如 `main.main`、`hello` 或完整路径 `callgraph-mcp/tests/fixtures/simple.main`
+- `direction` (string): 遍历方向，可选值：`downstream`（默认）、`upstream`、`both`
 
-### 示例请求
-
+**示例请求（包级调用图）**：
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "callgraph",
+    "name": "callHierarchy",
     "arguments": {
       "moduleArgs": ["./examples/main"],
       "algo": "static",
       "nostd": true,
       "focus": "main"
+    }
+  }
+}
+```
+
+**示例请求（符号定向遍历）**：
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "callHierarchy",
+    "arguments": {
+      "moduleArgs": ["./tests/fixtures/simple"],
+      "algo": "static",
+      "nostd": true,
+      "group": "pkg",
+      "symbol": "main.main",
+      "direction": "downstream"
     }
   }
 }

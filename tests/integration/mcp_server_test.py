@@ -8,17 +8,17 @@ import subprocess
 import sys
 
 def test_mcp_server():
-    # Test request with package grouping (without nostd to see all calls)
+    # Test request with package grouping
     request = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": "callgraph",
+            "name": "callHierarchy",
             "arguments": {
                 "moduleArgs": ["../fixtures/simple"],
                 "algo": "static",
-                "nostd": False,
+                "nostd": True,
                 "group": "pkg"
             }
         }

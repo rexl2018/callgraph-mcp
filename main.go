@@ -7,7 +7,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	
+
 	"callgraph-mcp/handlers"
 )
 
@@ -24,21 +24,21 @@ func main() {
 		"1.0.0",
 	)
 
-	// Register the callgraph tool
+	// Register the unified callHierarchy tool
 	mcpServer.AddTool(mcp.Tool{
-		Name:        "callgraph",
-		Description: "Generate call graph for Go packages in JSON format",
+		Name:        "callHierarchy",
+		Description: "Generate call hierarchy for Go packages/functions in Mermaid format",
 		InputSchema: mcp.ToolInputSchema{
 			Type: "object",
 			Properties: map[string]interface{}{
 				"moduleArgs": map[string]interface{}{
 					"type":        "array",
 					"items":       map[string]string{"type": "string"},
-					"description": "Package/module arguments (e.g., ['./...'])",
+					"description": "Go package paths to analyze (e.g., ['./...', './cmd/myapp', 'github.com/user/repo'])",
 				},
 				"dir": map[string]interface{}{
 					"type":        "string",
-					"description": "Working directory",
+					"description": "Working directory for resolving relative package paths (defaults to current directory)",
 				},
 				"focus": map[string]interface{}{
 					"type":        "string",
@@ -46,7 +46,8 @@ func main() {
 				},
 				"group": map[string]interface{}{
 					"type":        "string",
-					"description": "Grouping functions by packages and/or types [pkg, type] (separated by comma)",
+					"description": "Grouping functions by packages and/or types [pkg,type] (separated by comma)",
+					"default":     "pkg",
 				},
 				"limit": map[string]interface{}{
 					"type":        "string",
@@ -63,14 +64,17 @@ func main() {
 				"nostd": map[string]interface{}{
 					"type":        "boolean",
 					"description": "Omit calls to/from packages in standard library",
+					"default":     true,
 				},
 				"nointer": map[string]interface{}{
 					"type":        "boolean",
 					"description": "Omit calls to unexported functions",
+					"default":     true,
 				},
 				"tests": map[string]interface{}{
 					"type":        "boolean",
 					"description": "Include test code",
+					"default":     false,
 				},
 				"algo": map[string]interface{}{
 					"type":        "string",
@@ -81,10 +85,21 @@ func main() {
 					"type":        "array",
 					"items":       map[string]string{"type": "string"},
 					"description": "Build tags",
+					"default":     []string{},
 				},
 				"debug": map[string]interface{}{
 					"type":        "boolean",
 					"description": "Enable verbose log",
+					"default":     false,
+				},
+				"symbol": map[string]interface{}{
+					"type":        "string",
+					"description": "Function symbol to start traversal from. Supports: function name ('hello'), package.function ('main.main'), or full path ('github.com/user/repo.function')",
+				},
+				"direction": map[string]interface{}{
+					"type":        "string",
+					"enum":        []string{"upstream", "downstream", "both"},
+					"description": "Traversal direction (default: downstream)",
 				},
 			},
 			Required: []string{"moduleArgs"},

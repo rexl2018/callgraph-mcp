@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"callgraph-mcp/handlers"
@@ -15,7 +16,7 @@ func main() {
 	// Test with nostd=true - should now filter out io/fs, math/bits etc.
 	request := mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
-			Name: "callgraph",
+			Name: "callHierarchy",
 			Arguments: map[string]interface{}{
 				"moduleArgs": []string{"./tests/fixtures/simple"},
 				"algo":       "static",
@@ -42,4 +43,74 @@ func main() {
 	fmt.Println("- Should NOT see hello() -> fmt.Println() call (filtered by nostd)")
 	fmt.Println("- Should NOT see io/fs, math/bits etc. (filtered by improved nostd)")
 	fmt.Println("- Should have subgraph for main package")
+	
+	fmt.Println("\n=== Demo: callHierarchy (upstream from hello) ===")
+	reqUpHello := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "callHierarchy",
+			Arguments: map[string]interface{}{
+				"moduleArgs": []string{"./tests/fixtures/simple"},
+				"algo":       "static",
+				"nostd":      true,
+				"group":      "pkg",
+				"symbol":     "hello",
+				"direction":  "upstream",
+			},
+		},
+	}
+	if res, err := handlers.HandleCallgraphRequest(context.Background(), reqUpHello); err != nil {
+		log.Printf("Error: %v", err)
+	} else if tc, ok := res.Content[0].(mcp.TextContent); ok {
+		fmt.Println(tc.Text)
+	}
+
+	fmt.Println("\n=== Demo: callHierarchy (upstream from goodbye) ===")
+	reqUpGoodbye := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "callHierarchy",
+			Arguments: map[string]interface{}{
+				"moduleArgs": []string{"./tests/fixtures/simple"},
+				"algo":       "static",
+				"nostd":      true,
+				"group":      "pkg",
+				"symbol":     "goodbye",
+				"direction":  "upstream",
+			},
+		},
+	}
+	if res, err := handlers.HandleCallgraphRequest(context.Background(), reqUpGoodbye); err != nil {
+		log.Printf("Error: %v", err)
+	} else if tc, ok := res.Content[0].(mcp.TextContent); ok {
+		fmt.Println(tc.Text)
+	}
+
+	fmt.Println("\n=== Demo: callHierarchy (downstream main.main) across algorithms ===")
+	algos := []string{"static", "cha", "rta"}
+	for _, a := range algos {
+		fmt.Printf("-- algo: %s --\n", a)
+		req := mcp.CallToolRequest{
+			Params: mcp.CallToolParams{
+				Name: "callHierarchy",
+				Arguments: map[string]interface{}{
+					"moduleArgs": []string{"./tests/fixtures/simple"},
+					"algo":       a,
+					"nostd":      true,
+					"group":      "pkg",
+					"symbol":     "main.main",
+					"direction":  "downstream",
+				},
+			},
+		}
+		res, err := handlers.HandleCallgraphRequest(context.Background(), req)
+		if err != nil {
+			log.Printf("Error: %v", err)
+			continue
+		}
+		if tc, ok := res.Content[0].(mcp.TextContent); ok {
+			text := tc.Text
+			foundWorker := strings.Contains(text, "callgraph_mcp_tests_fixtures_simple_worker[")
+			foundMainWorker := strings.Contains(text, "callgraph_mcp_tests_fixtures_simple_main --> callgraph_mcp_tests_fixtures_simple_worker")
+			fmt.Printf("worker node: %v, main->worker edge: %v\n", foundWorker, foundMainWorker)
+		}
+	}
 }
