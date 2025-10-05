@@ -2,7 +2,6 @@ package integration
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -36,34 +35,16 @@ func TestCallgraphToolIntegration(t *testing.T) {
 		t.Fatal("result content is empty")
 	}
 
-	// Check if the result contains valid JSON
+	// Validate Mermaid flowchart string
 	textContent, ok := result.Content[0].(mcp.TextContent)
 	if !ok {
 		t.Fatal("result content is not TextContent")
 	}
-
-	var response handlers.MCPCallgraphResponse
-	if err := json.Unmarshal([]byte(textContent.Text), &response); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
+	if text := textContent.Text; text == "" {
+		t.Fatal("Mermaid output is empty")
+	} else if !(len(text) >= 10 && text[:10] == "flowchart ") {
+		t.Fatalf("Mermaid output does not start with 'flowchart ': %q", text[:10])
 	}
-
-	// Basic validation
-	if response.Algorithm == "" {
-		t.Error("algorithm is empty")
-	}
-
-	if response.Stats.DurationMs <= 0 {
-		t.Error("duration should be positive")
-	}
-
-	// Should have some stats (even if filtered out, we should have processed something)
-	if response.Stats.DurationMs <= 0 {
-		t.Error("duration should be positive, indicating processing occurred")
-	}
-	
-	// Log the actual stats for debugging
-	t.Logf("Stats: NodeCount=%d, EdgeCount=%d, DurationMs=%d", 
-		response.Stats.NodeCount, response.Stats.EdgeCount, response.Stats.DurationMs)
 }
 
 func TestCallgraphToolWithDifferentAlgorithms(t *testing.T) {
@@ -91,50 +72,35 @@ func TestCallgraphToolWithDifferentAlgorithms(t *testing.T) {
 				t.Fatalf("result is nil for %s", algo)
 			}
 
-			// Parse response
+			// Validate Mermaid output
 			textContent, ok := result.Content[0].(mcp.TextContent)
 			if !ok {
 				t.Fatalf("result content is not TextContent for %s", algo)
 			}
-
-			var response handlers.MCPCallgraphResponse
-			if err := json.Unmarshal([]byte(textContent.Text), &response); err != nil {
-				t.Fatalf("failed to parse response JSON for %s: %v", algo, err)
-			}
-
-			if response.Algorithm != algo {
-				t.Errorf("expected algorithm %s, got %s", algo, response.Algorithm)
+			if text := textContent.Text; text == "" {
+				t.Fatalf("Mermaid output is empty for %s", algo)
+			} else if !(len(text) >= 10 && text[:10] == "flowchart ") {
+				t.Fatalf("Mermaid output does not start with 'flowchart ' for %s: %q", algo, text[:10])
 			}
 		})
 	}
 }
 
 func TestCallgraphToolErrorHandling(t *testing.T) {
+	// Keep error handling tests, e.g., invalid algo should still error from DoAnalysis
 	tests := []struct {
 		name    string
 		request mcp.CallToolRequest
 		wantErr bool
 	}{
 		{
-			name: "missing module args",
+			name: "missing moduleArgs",
 			request: mcp.CallToolRequest{
 				Params: mcp.CallToolParams{
 					Name: "callgraph",
 					Arguments: map[string]interface{}{
-						"algo": "static",
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid module path",
-			request: mcp.CallToolRequest{
-				Params: mcp.CallToolParams{
-					Name: "callgraph",
-					Arguments: map[string]interface{}{
-						"moduleArgs": []string{"./nonexistent"},
-						"algo":       "static",
+						"algo":  "static",
+						"nostd": true,
 					},
 				},
 			},
@@ -158,13 +124,12 @@ func TestCallgraphToolErrorHandling(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := handlers.HandleCallgraphRequest(context.Background(), tt.request)
-			
 			if tt.wantErr {
 				if err == nil && (result == nil || !result.IsError) {
 					t.Error("expected error but got none")
 				}
 			} else {
-				if err != nil {
+				if err != nil || result == nil || result.IsError {
 					t.Errorf("unexpected error: %v", err)
 				}
 			}

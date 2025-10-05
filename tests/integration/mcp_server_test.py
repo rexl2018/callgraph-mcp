@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 def test_mcp_server():
-    # Test request
+    # Test request with package grouping (without nostd to see all calls)
     request = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -18,7 +18,8 @@ def test_mcp_server():
             "arguments": {
                 "moduleArgs": ["../fixtures/simple"],
                 "algo": "static",
-                "nostd": True
+                "nostd": False,
+                "group": "pkg"
             }
         }
     }
@@ -37,18 +38,32 @@ def test_mcp_server():
         request_str = json.dumps(request) + "\n"
         stdout, stderr = process.communicate(input=request_str, timeout=30)
         
+        print("=== MCP Request ===")
+        print(json.dumps(request, indent=2))
+        
+        print("\n=== MCP Response ===")
         print("STDOUT:")
         print(stdout)
         print("\nSTDERR:")
         print(stderr)
         print(f"\nReturn code: {process.returncode}")
         
-        # Try to parse response
+        # Try to parse response and extract Mermaid content
         if stdout.strip():
             try:
                 response = json.loads(stdout.strip())
-                print("\nParsed response:")
+                print("\n=== Parsed JSON Response ===")
                 print(json.dumps(response, indent=2))
+                
+                # Extract and display Mermaid content
+                if "result" in response and "content" in response["result"]:
+                    content = response["result"]["content"]
+                    if content and len(content) > 0 and "text" in content[0]:
+                        mermaid_text = content[0]["text"]
+                        print("\n=== Mermaid Flowchart Output ===")
+                        print(mermaid_text)
+                        print("=== End of Mermaid Output ===")
+                        
             except json.JSONDecodeError as e:
                 print(f"\nFailed to parse JSON response: {e}")
         

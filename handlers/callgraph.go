@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/emicklei/dot"
 	"github.com/mark3labs/mcp-go/mcp"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/callgraph/cha"
@@ -165,6 +166,11 @@ func HandleCallgraphRequest(ctx context.Context, request mcp.CallToolRequest) (*
 		req.Group = "pkg"
 	}
 
+	// Set debug flag
+	if req.Debug {
+		*debugFlag = true
+	}
+
 	// Map MCP request to internal analysis options
 	opts := mapMCPRequestToRenderOpts(req)
 	
@@ -197,8 +203,8 @@ func HandleCallgraphRequest(ctx context.Context, request mcp.CallToolRequest) (*
 		}, nil
 	}
 
-	// Generate JSON output instead of DOT
-	jsonData, stats, err := generateJSONCallgraph(analysis)
+	// Generate Mermaid output instead of JSON
+	mermaidCode, stats, err := generateMermaidCallgraph(analysis)
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -208,44 +214,14 @@ func HandleCallgraphRequest(ctx context.Context, request mcp.CallToolRequest) (*
 		}, nil
 	}
 
-	// Calculate duration
+	// Calculate duration (optional usage)
 	duration := time.Since(start)
 	stats.DurationMs = int(duration.Milliseconds())
 
-	// Build response
-	response := MCPCallgraphResponse{
-		Algorithm: req.Algo,
-		Focus:     nil,
-		Filters: MCPCallgraphFilters{
-			Limit:   analysis.opts.limit,
-			Ignore:  analysis.opts.ignore,
-			Include: analysis.opts.include,
-			NoStd:   analysis.opts.nostd,
-			NoInter: analysis.opts.nointer,
-			Group:   analysis.opts.group,
-		},
-		Stats: stats,
-		Graph: jsonData,
-	}
-
-	if req.Focus != "" {
-		response.Focus = &req.Focus
-	}
-
-	// Convert response to JSON
-	responseJSON, err := json.MarshalIndent(response, "", "  ")
-	if err != nil {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{
-				mcp.NewTextContent(fmt.Sprintf("Error marshaling response: %v", err)),
-			},
-			IsError: true,
-		}, nil
-	}
-
+	// Return Mermaid flowchart code directly
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
-			mcp.NewTextContent(string(responseJSON)),
+			mcp.NewTextContent(mermaidCode),
 		},
 	}, nil
 }
@@ -463,19 +439,64 @@ func inStd(node *callgraph.Node) bool {
 
 // isStdPkgPath checks if a package path is standard library
 func isStdPkgPath(path string) bool {
+	// main package should not be considered standard library
+	if path == "main" {
+		return false
+	}
+	// Packages with dots are typically user packages (e.g., github.com/user/repo)
 	if strings.Contains(path, ".") {
 		return false
 	}
+	// Packages with slashes are typically user packages (e.g., user/repo)
+	// BUT standard library also has subpackages like io/fs, math/bits
+	if strings.Contains(path, "/") {
+		// Check if it's a standard library subpackage
+		parts := strings.Split(path, "/")
+		if len(parts) >= 2 {
+			// Common standard library top-level packages
+			stdPkgs := []string{
+				"archive", "bufio", "builtin", "bytes", "compress", "container",
+				"context", "crypto", "database", "debug", "embed", "encoding",
+				"errors", "expvar", "flag", "fmt", "go", "hash", "html", "image",
+				"index", "io", "log", "math", "mime", "net", "os", "path",
+				"plugin", "reflect", "regexp", "runtime", "sort", "strconv",
+				"strings", "sync", "syscall", "testing", "text", "time",
+				"unicode", "unsafe",
+			}
+			for _, stdPkg := range stdPkgs {
+				if parts[0] == stdPkg {
+					return true // It's a standard library subpackage
+				}
+			}
+		}
+		return false // User package with slash
+	}
+	// Standard library packages (single word without dots or slashes)
 	return true
 }
 
-// generateJSONCallgraph generates JSON callgraph data instead of DOT format
-func generateJSONCallgraph(a *analysis) (MCPCallgraphData, MCPCallgraphStats, error) {
-	var nodes []MCPCallgraphNode
-	var edges []MCPCallgraphEdge
-	
+// isInternalPkg checks if a package is an internal runtime package
+func isInternalPkg(path string) bool {
+	return strings.HasPrefix(path, "internal/") || 
+		   strings.Contains(path, "/internal/") ||
+		   path == "runtime" ||
+		   strings.HasPrefix(path, "runtime/") ||
+		   path == "sync" ||
+		   strings.HasPrefix(path, "sync/")
+}
+
+// generateMermaidCallgraph builds a DOT graph using emicklei/dot and returns Mermaid flowchart code
+func generateMermaidCallgraph(a *analysis) (string, MCPCallgraphStats, error) {
+	var stats MCPCallgraphStats
+
+	// Build a DOT graph (directed)
+	g := dot.NewGraph(dot.Directed)
+	g.Attr("label", "callgraph")
+
+	// Helper maps
 	nodeMap := make(map[string]*MCPCallgraphNode)
 	edgeMap := make(map[string]*MCPCallgraphEdge)
+	dotNodes := make(map[string]dot.Node)
 
 	// Get focus package if specified
 	var focusPkg *types.Package
@@ -483,7 +504,6 @@ func generateJSONCallgraph(a *analysis) (MCPCallgraphData, MCPCallgraphStats, er
 		if ssaPkg := a.prog.ImportedPackage(a.opts.focus); ssaPkg != nil {
 			focusPkg = ssaPkg.Pkg
 		} else {
-			// Try to find package by name
 			for _, p := range a.pkgs {
 				if p.Pkg.Name() == a.opts.focus {
 					if ssaPkg := a.prog.ImportedPackage(p.Pkg.Path()); ssaPkg != nil {
@@ -498,7 +518,7 @@ func generateJSONCallgraph(a *analysis) (MCPCallgraphData, MCPCallgraphStats, er
 	// Delete synthetic nodes
 	a.callgraph.DeleteSyntheticNodes()
 
-	// Define filter functions
+	// Filter helpers
 	var isFocused = func(edge *callgraph.Edge) bool {
 		caller := edge.Caller
 		callee := edge.Callee
@@ -552,90 +572,204 @@ func generateJSONCallgraph(a *analysis) (MCPCallgraphData, MCPCallgraphStats, er
 		return false
 	}
 
-	// Process all edges
-	for _, node := range a.callgraph.Nodes {
-		for _, edge := range node.Out {
-			caller := edge.Caller
-			callee := edge.Callee
+	// Traverse callgraph and populate nodes/edges
+	for _, n := range a.callgraph.Nodes {
+		for _, e := range n.Out {
+			caller := e.Caller
+			callee := e.Callee
 
-			// Skip synthetic edges
-			if isSynthetic(edge) {
+			if isSynthetic(e) {
 				continue
 			}
-
-			// Apply filters
+			
 			if a.opts.nostd && (inStd(caller) || inStd(callee)) {
 				continue
 			}
-
+			
+			// Also filter internal runtime packages when nostd is true
+			if a.opts.nostd && (isInternalPkg(caller.Func.Pkg.Pkg.Path()) || isInternalPkg(callee.Func.Pkg.Pkg.Path())) {
+				continue
+			}
 			if a.opts.nointer && (!caller.Func.Object().Exported() || !callee.Func.Object().Exported()) {
 				continue
 			}
-
 			if len(a.opts.include) > 0 && !(inIncludes(caller) || inIncludes(callee)) {
 				continue
 			}
-
 			if len(a.opts.limit) > 0 && !(inLimits(caller) || inLimits(callee)) {
 				continue
 			}
-
 			if len(a.opts.ignore) > 0 && (inIgnores(caller) || inIgnores(callee)) {
 				continue
 			}
-
-			if focusPkg != nil && !isFocused(edge) {
+			if focusPkg != nil && !isFocused(e) {
 				continue
 			}
 
-			// Create nodes if they don't exist
 			callerID := fmt.Sprintf("%s", caller.Func)
 			calleeID := fmt.Sprintf("%s", callee.Func)
 
-			if _, exists := nodeMap[callerID]; !exists {
+			if _, ok := nodeMap[callerID]; !ok {
 				pos := a.prog.Fset.Position(caller.Func.Pos())
 				nodeMap[callerID] = createJSONNode(caller, pos)
 			}
-
-			if _, exists := nodeMap[calleeID]; !exists {
+			if _, ok := nodeMap[calleeID]; !ok {
 				pos := a.prog.Fset.Position(callee.Func.Pos())
 				nodeMap[calleeID] = createJSONNode(callee, pos)
 			}
 
-			// Create edge
+			// Create DOT nodes
+			dFromID := sanitizeMermaidID(callerID)
+			dToID := sanitizeMermaidID(calleeID)
+			if _, exists := dotNodes[dFromID]; !exists {
+				dotNodes[dFromID] = g.Node(dFromID)
+			}
+			if _, exists := dotNodes[dToID]; !exists {
+				dotNodes[dToID] = g.Node(dToID)
+			}
+			g.Edge(dotNodes[dFromID], dotNodes[dToID])
+
 			edgeID := fmt.Sprintf("%s->%s", callerID, calleeID)
 			if _, exists := edgeMap[edgeID]; !exists {
-				pos := a.prog.Fset.Position(edge.Pos())
+				pos := a.prog.Fset.Position(e.Pos())
 				edgeMap[edgeID] = &MCPCallgraphEdge{
 					Caller:    callerID,
 					Callee:    calleeID,
 					File:      pos.Filename,
 					Line:      pos.Line,
-					Synthetic: isSynthetic(edge),
+					Synthetic: isSynthetic(e),
 				}
 			}
 		}
 	}
 
-	// Convert maps to slices
-	for _, node := range nodeMap {
-		nodes = append(nodes, *node)
-	}
-	for _, edge := range edgeMap {
-		edges = append(edges, *edge)
+	// Build Mermaid flowchart text
+	var sb strings.Builder
+	// Direction: Left-to-Right (LR). Could be configurable.
+	sb.WriteString("flowchart LR\n")
+
+	// Determine grouping options
+	hasPkg := false
+	hasType := false
+	for _, g := range a.opts.group {
+		if g == "pkg" {
+			hasPkg = true
+		}
+		if g == "type" {
+			hasType = true
+		}
 	}
 
-	stats := MCPCallgraphStats{
-		NodeCount: len(nodes),
-		EdgeCount: len(edges),
+	// Helper to write a single node line and its file:line comment
+	writeNode := func(id string, n *MCPCallgraphNode) {
+		mid := sanitizeMermaidID(id)
+		label := fmt.Sprintf("%s<br/>%s", n.Func, n.PackageName)
+		sb.WriteString(fmt.Sprintf("%s[%q]\n", mid, label))
+		// Append file:line as a Mermaid comment
+		sb.WriteString(fmt.Sprintf("%%%% %s:%d\n", n.File, n.Line))
 	}
 
-	data := MCPCallgraphData{
-		Nodes: nodes,
-		Edges: edges,
+	if hasPkg && hasType {
+		// Nested grouping: pkg -> type -> nodes
+		nested := make(map[string]map[string][]string)
+		for id, n := range nodeMap {
+			pkg := n.PackagePath
+			typ := "func"
+			if n.ReceiverType != nil && *n.ReceiverType != "" {
+				typ = *n.ReceiverType
+			}
+			if _, ok := nested[pkg]; !ok {
+				nested[pkg] = make(map[string][]string)
+			}
+			nested[pkg][typ] = append(nested[pkg][typ], id)
+		}
+		for pkg, typeMap := range nested {
+			// Subgraph per package
+			sb.WriteString(fmt.Sprintf("subgraph %q\n", "pkg:"+pkg))
+			for typ, ids := range typeMap {
+				// Subgraph per type within package
+				sb.WriteString(fmt.Sprintf("subgraph %q\n", "type:"+typ))
+				for _, id := range ids {
+					writeNode(id, nodeMap[id])
+				}
+				sb.WriteString("end\n")
+			}
+			sb.WriteString("end\n")
+		}
+	} else if hasPkg {
+		// Group by package only
+		groups := make(map[string][]string)
+		for id, n := range nodeMap {
+			groups[n.PackagePath] = append(groups[n.PackagePath], id)
+		}
+		for pkg, ids := range groups {
+			sb.WriteString(fmt.Sprintf("subgraph %q\n", "pkg:"+pkg))
+			for _, id := range ids {
+				writeNode(id, nodeMap[id])
+			}
+			sb.WriteString("end\n")
+		}
+	} else if hasType {
+		// Group by type (receiver) only
+		groups := make(map[string][]string)
+		for id, n := range nodeMap {
+			typ := "func"
+			if n.ReceiverType != nil && *n.ReceiverType != "" {
+				typ = *n.ReceiverType
+			}
+			groups[typ] = append(groups[typ], id)
+		}
+		for typ, ids := range groups {
+			sb.WriteString(fmt.Sprintf("subgraph %q\n", "type:"+typ))
+			for _, id := range ids {
+				writeNode(id, nodeMap[id])
+			}
+			sb.WriteString("end\n")
+		}
+	} else {
+		// No grouping, declare all nodes at top level
+		for id, n := range nodeMap {
+			writeNode(id, n)
+		}
 	}
 
-	return data, stats, nil
+	// Declare edges
+	for _, ed := range edgeMap {
+		from := sanitizeMermaidID(ed.Caller)
+		to := sanitizeMermaidID(ed.Callee)
+		sb.WriteString(fmt.Sprintf("%s --> %s\n", from, to))
+	}
+
+	stats.NodeCount = len(nodeMap)
+	stats.EdgeCount = len(edgeMap)
+
+	return sb.String(), stats, nil
+}
+
+// sanitizeMermaidID creates a safe identifier for Mermaid nodes
+func sanitizeMermaidID(s string) string {
+	// Replace characters not suitable for Mermaid identifiers
+	replacer := strings.NewReplacer(
+		" ", "_",
+		"\t", "_",
+		"\n", "_",
+		"\r", "_",
+		".", "_",
+		"/", "_",
+		"-", "_",
+		":", "_",
+		"(", "_",
+		")", "_",
+		"*", "_",
+		"[", "_",
+		"]", "_",
+	)
+	// Limit length to avoid extremely long ids
+	safe := replacer.Replace(s)
+	if len(safe) > 128 {
+		return safe[:128]
+	}
+	return safe
 }
 
 func createJSONNode(node *callgraph.Node, pos token.Position) *MCPCallgraphNode {

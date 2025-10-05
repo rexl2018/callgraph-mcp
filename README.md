@@ -6,7 +6,7 @@
 
 - 🔍 **静态分析**：支持 `static`、`cha`、`rta` 三种调用图算法
 - 🎯 **精确过滤**：支持包路径过滤、标准库过滤、未导出函数过滤等
-- 📊 **JSON 输出**：返回结构化的 JSON 数据，包含节点和边信息
+- 📊 **Mermaid 输出**：返回 Mermaid flowchart 格式的调用图，支持包分组和文件位置注释
 - 🔌 **MCP 协议**：完全兼容 Model Context Protocol，可与支持 MCP 的客户端集成
 - ⚡ **高性能**：基于 Go 的 SSA 中间表示进行分析
 
@@ -68,49 +68,26 @@ callgraph-mcp 主要设计为 MCP 服务器使用。启动服务器：
 
 ### 响应格式
 
-```json
-{
-  "algorithm": "static",
-  "focus": "main",
-  "filters": {
-    "limit": [],
-    "ignore": [],
-    "include": [],
-    "nostd": true,
-    "nointer": false,
-    "group": ["pkg"]
-  },
-  "stats": {
-    "nodeCount": 5,
-    "edgeCount": 8,
-    "durationMs": 123
-  },
-  "graph": {
-    "nodes": [
-      {
-        "id": "main.main",
-        "func": "main",
-        "packagePath": "main",
-        "packageName": "main",
-        "file": "main.go",
-        "line": 10,
-        "isStd": false,
-        "exported": true,
-        "receiverType": null
-      }
-    ],
-    "edges": [
-      {
-        "caller": "main.main",
-        "callee": "main.hello",
-        "file": "main.go",
-        "line": 11,
-        "synthetic": false
-      }
-    ]
-  }
-}
+工具返回 Mermaid flowchart 格式的调用图：
+
+```mermaid
+flowchart LR
+subgraph "pkg:callgraph-mcp/tests/fixtures/simple"
+callgraph_mcp_tests_fixtures_simple_main["main<br/>main"]
+%% main.go:9
+callgraph_mcp_tests_fixtures_simple_hello["hello<br/>main"]
+%% main.go:5
+end
+callgraph_mcp_tests_fixtures_simple_main --> callgraph_mcp_tests_fixtures_simple_hello
 ```
+
+#### Mermaid 格式特性
+
+- **包分组**: 使用 `subgraph` 按包路径分组函数
+- **节点标签**: 显示函数名和包名，格式为 `"函数名<br/>包名"`
+- **文件位置**: 每个节点后有注释行，显示文件名和行号，使用 `%% 文件名:行号`
+- **调用关系**: 使用箭头 `-->` 表示函数调用
+- **ID 安全化**: 节点 ID 经过处理，兼容 Mermaid 语法
 
 ## 算法说明
 
@@ -172,6 +149,40 @@ go test ./tests/integration/...
 cd tests && make test-all
 ```
 
+#### 快速演示
+
+项目提供了一个演示程序，可以快速测试 callgraph 工具的功能：
+
+```bash
+# 运行演示程序
+go run ./cmd/demo
+
+# 演示程序会分析 tests/fixtures/simple 包
+# 使用 nostd=true 和 group=pkg 参数
+# 输出简洁的 Mermaid flowchart 格式
+```
+
+演示程序的输出示例：
+```
+=== Mermaid Output (improved nostd=true, group=pkg) ===
+flowchart LR
+subgraph "pkg:callgraph-mcp/tests/fixtures/simple"
+callgraph_mcp_tests_fixtures_simple_main["main<br/>main"]
+%% main.go:9
+callgraph_mcp_tests_fixtures_simple_hello["hello<br/>main"]
+%% main.go:5
+end
+callgraph_mcp_tests_fixtures_simple_main --> callgraph_mcp_tests_fixtures_simple_hello
+
+=== End (Length: 293 characters) ===
+```
+
+这个演示展示了：
+- 包分组功能（subgraph）
+- 函数调用关系（main -> hello）
+- 文件位置注释（%% main.go:5）
+- 标准库过滤效果（不显示 fmt.Println 调用）
+
 更多测试相关信息请参考 [tests/README.md](tests/README.md)。
 
 ### 构建
@@ -180,10 +191,8 @@ cd tests && make test-all
 go build -o callgraph-mcp
 ```
 
-
 ## 参考项目
 - [go-callvis](https://github.com/ofabry/go-callvis)
-
 
 ---
 
