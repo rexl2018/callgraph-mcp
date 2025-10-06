@@ -114,4 +114,27 @@ func main() {
 			fmt.Printf("worker node: %v, main->worker edge: %v\n", foundWorker, foundMainWorker)
 		}
 	}
+    fmt.Println("\n=== Demo: battle_task downstream CreateTask (max_dep=5) ===")
+    reqBattle := mcp.CallToolRequest{
+        Params: mcp.CallToolParams{
+            Name: "callHierarchy",
+            Arguments: map[string]interface{}{
+                "moduleArgs": []string{"./..."},
+                "dir":        "/Users/bytedance/work/git/battle_task",
+				"limit_keyword": []string{"battle_task"},
+				//"limit_prefix": []string{"code.byted.org/tikcast/battle_task"},
+                //"symbol":     "CreateTask",
+                //"direction":  "downstream",
+                "max_dep":    5,
+				"algo":       "rta",
+            },
+        },
+    }
+    resBattle, err := handlers.HandleCallgraphRequest(context.Background(), reqBattle)
+    if err != nil {
+        log.Printf("Error running battle_task demo: %v", err)
+    } else if textContent, ok := resBattle.Content[0].(mcp.TextContent); ok {
+        fmt.Println(textContent.Text)
+        fmt.Printf("=== End (Length: %d characters) ===\n", len(textContent.Text))
+    }
 }

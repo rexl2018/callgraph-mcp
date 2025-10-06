@@ -43,7 +43,7 @@ callgraph-mcp 主要设计为 MCP 服务器使用。启动服务器：
 - `dir` (string): 工作目录，用于解析相对路径，默认当前目录
 - `focus` (string): 聚焦特定包（按名称或导入路径）
 - `group` (string): 分组方式，可选值：`pkg`（默认）、`type`，用逗号分隔
-- `limit_keyword` (string): 包路径关键词过滤（逗号分隔关键词）
+- `limit_keyword` (string): 包路径关键词过滤（逗号分隔关键词，caller 和 callee 必须同时匹配）
 - `ignore` (string): 包路径过滤（逗号分隔关键词）
 - `limit_prefix` (string): 包路径前缀过滤（逗号分隔前缀，caller 和 callee 必须同时匹配）
 
@@ -136,7 +136,7 @@ callgraph_mcp_tests_fixtures_simple_main --> callgraph_mcp_tests_fixtures_simple
 ## 过滤选项
 
 ### 包路径过滤
-- `limit_keyword`: 只包含包含指定关键词的包
+- `limit_keyword`: 只包含包含指定关键词的包（caller 和 callee 必须同时匹配）
 - `ignore`: 排除包含指定关键词的包
 - `limit_prefix`: 强制包含指定前缀的包（caller 和 callee 必须同时匹配）
 

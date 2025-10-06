@@ -44,6 +44,7 @@ type renderOpts struct {
 	refresh  bool
 	nostd    bool
 	algo     CallGraphType
+	maxDep   int
 }
 
 type analysis struct {
@@ -71,6 +72,7 @@ type MCPCallgraphRequest struct {
 	Debug      bool     `json:"debug,omitempty"`
 	Symbol    string `json:"symbol,omitempty"`
 	Direction string `json:"direction,omitempty"`
+	MaxDep    int    `json:"max_dep,omitempty"`
 }
 
 // MCPCallgraphResponse represents the output of the callgraph tool via MCP
@@ -162,7 +164,7 @@ func HandleCallgraphRequest(ctx context.Context, request mcp.CallToolRequest) (*
 	// Unified tool: when symbol is provided, perform directional traversal; otherwise, generate package-level callgraph
 	// Set defaults
 	if req.Algo == "" {
-	    req.Algo = "static"
+	    req.Algo = "rta"
 	}
 	if len(req.Group) == 0 {
 	    req.Group = []string{"pkg"}
@@ -177,12 +179,12 @@ func HandleCallgraphRequest(ctx context.Context, request mcp.CallToolRequest) (*
 	// Note: Go's zero value for bool is false, but our schema defaults are different
 	if args, ok := request.Params.Arguments.(map[string]interface{}); ok {
 	    // Check if nostd was explicitly provided in the request
-	    if _, exists := args["nostd"]; !exists {
-	        req.NoStd = true  // Schema default is true
-	    }
+	    if _, exists := args["nostd"]; !exists { req.NoStd = true }
 	    // Check if nointer was explicitly provided in the request
-	    if _, exists := args["nointer"]; !exists {
-	        req.NoInter = true  // Schema default is true
+	    if _, exists := args["nointer"]; !exists { req.NoInter = true }
+	    // Dynamic default for max_dep depending on symbol presence
+	    if _, exists := args["max_dep"]; !exists {
+	        if req.Symbol != "" { req.MaxDep = 7 } else { req.MaxDep = 4 }
 	    }
 	}
 	// Map MCP request to internal analysis options
@@ -274,6 +276,7 @@ func mapMCPRequestToRenderOpts(req MCPCallgraphRequest) *renderOpts {
 		refresh:  false,
 		nostd:    req.NoStd,
 		algo:     CallGraphType(req.Algo),
+		maxDep:   req.MaxDep,
 	}
 }
 
@@ -473,7 +476,10 @@ func isSynthetic(edge *callgraph.Edge) bool {
 
 // inStd checks if a node is in standard library
 func inStd(node *callgraph.Node) bool {
-	return isStdPkgPath(node.Func.Pkg.Pkg.Path())
+    if node == nil || node.Func == nil || node.Func.Pkg == nil || node.Func.Pkg.Pkg == nil {
+        return false
+    }
+    return isStdPkgPath(node.Func.Pkg.Pkg.Path())
 }
 
 // isStdPkgPath checks if a package path is standard library
@@ -526,289 +532,290 @@ func isInternalPkg(path string) bool {
 
 // generateMermaidCallgraph builds a DOT graph using emicklei/dot and returns Mermaid flowchart code
 func generateMermaidCallgraph(a *analysis) (string, MCPCallgraphStats, error) {
-	var stats MCPCallgraphStats
+    var stats MCPCallgraphStats
 
-	// Build a DOT graph (directed)
-	g := dot.NewGraph(dot.Directed)
-	g.Attr("label", "callgraph")
+    // Build a DOT graph (directed)
+    g := dot.NewGraph(dot.Directed)
+    g.Attr("label", "callgraph")
 
-	// Helper maps
-	nodeMap := make(map[string]*MCPCallgraphNode)
-	edgeMap := make(map[string]*MCPCallgraphEdge)
-	dotNodes := make(map[string]dot.Node)
+    // Helper maps
+    nodeMap := make(map[string]*MCPCallgraphNode)
+    edgeMap := make(map[string]*MCPCallgraphEdge)
+    dotNodes := make(map[string]dot.Node)
 
-	// Get focus package if specified
-	var focusPkg *types.Package
-	if a.opts.focus != "" {
-		if ssaPkg := a.prog.ImportedPackage(a.opts.focus); ssaPkg != nil {
-			focusPkg = ssaPkg.Pkg
-		} else {
-			for _, p := range a.pkgs {
-				if p.Pkg.Name() == a.opts.focus {
-					if ssaPkg := a.prog.ImportedPackage(p.Pkg.Path()); ssaPkg != nil {
-						focusPkg = ssaPkg.Pkg
-						break
-					}
-				}
-			}
-		}
-	}
+    // Get focus package if specified
+    var focusPkg *types.Package
+    if a.opts.focus != "" {
+        if ssaPkg := a.prog.ImportedPackage(a.opts.focus); ssaPkg != nil {
+            focusPkg = ssaPkg.Pkg
+        } else {
+            for _, p := range a.pkgs {
+                if p.Pkg.Name() == a.opts.focus {
+                    if ssaPkg := a.prog.ImportedPackage(p.Pkg.Path()); ssaPkg != nil {
+                        focusPkg = ssaPkg.Pkg
+                        break
+                    }
+                }
+            }
+        }
+    }
 
-	// Delete synthetic nodes
-	a.callgraph.DeleteSyntheticNodes()
+    // Delete synthetic nodes
+    a.callgraph.DeleteSyntheticNodes()
 
-	// Filter helpers
-	var isFocused = func(edge *callgraph.Edge) bool {
-		caller := edge.Caller
-		callee := edge.Callee
-		if focusPkg != nil && (caller.Func.Pkg.Pkg.Path() == focusPkg.Path() || callee.Func.Pkg.Pkg.Path() == focusPkg.Path()) {
-			return true
-		}
-		fromFocused := false
-		for _, e := range caller.In {
-			if !isSynthetic(e) && focusPkg != nil && e.Caller.Func.Pkg.Pkg.Path() == focusPkg.Path() {
-				fromFocused = true
-				break
-			}
-		}
-		toFocused := false
-		for _, e := range callee.Out {
-			if !isSynthetic(e) && focusPkg != nil && e.Callee.Func.Pkg.Pkg.Path() == focusPkg.Path() {
-				toFocused = true
-				break
-			}
-		}
-		return fromFocused && toFocused
-	}
+    // Depth limiting: compute minimal depth from roots (main/init) if maxDep > 0
+    depthMap := make(map[*callgraph.Node]int)
+    if a.opts.maxDep > 0 {
+        // collect roots: main functions and init functions
+        var roots []*callgraph.Node
+        if mains, err := mainPackages(a.pkgs); err == nil {
+            for _, mp := range mains {
+                if mp != nil {
+                    if mf := mp.Func("main"); mf != nil {
+                        if n := a.callgraph.Nodes[mf]; n != nil { roots = append(roots, n) }
+                    }
+                }
+            }
+        }
+        if inits, err := initFuncs(a.pkgs); err == nil {
+            for _, f := range inits {
+                if n := a.callgraph.Nodes[f]; n != nil { roots = append(roots, n) }
+            }
+        }
+        // fallback: nodes with no incoming edges
+        if len(roots) == 0 {
+            for _, n := range a.callgraph.Nodes {
+                if n != nil && len(n.In) == 0 { roots = append(roots, n) }
+            }
+        }
+        // BFS
+        type qitem struct{ n *callgraph.Node; d int }
+        queue := make([]qitem, 0, len(roots))
+        for _, r := range roots { depthMap[r] = 0; queue = append(queue, qitem{r, 0}) }
+        for len(queue) > 0 {
+            qi := queue[0]; queue = queue[1:]
+            n := qi.n; d := qi.d
+            // do not expand beyond maxDep
+            if d >= a.opts.maxDep { continue }
+            for _, e := range n.Out {
+                callee := e.Callee
+                if callee == nil { continue }
+                nd := d + 1
+                old, ok := depthMap[callee]
+                if !ok || nd < old {
+                    depthMap[callee] = nd
+                    queue = append(queue, qitem{callee, nd})
+                }
+            }
+        }
+    }
 
-	var inIncludes = func(node *callgraph.Node) bool {
-	    if node == nil || node.Func == nil || node.Func.Pkg == nil || node.Func.Pkg.Pkg == nil {
-	        return false
-	    }
-	    pkgPath := node.Func.Pkg.Pkg.Path()
-	    for _, p := range a.opts.include {
-	        if strings.HasPrefix(pkgPath, p) {
-	            return true
-	        }
-	    }
-	    return false
-	}
+    // Filter helpers
+    var isFocused = func(edge *callgraph.Edge) bool {
+        caller := edge.Caller
+        callee := edge.Callee
+        if focusPkg != nil && (caller.Func.Pkg.Pkg.Path() == focusPkg.Path() || callee.Func.Pkg.Pkg.Path() == focusPkg.Path()) {
+            return true
+        }
+        fromFocused := false
+        for _, e := range caller.In {
+            if !isSynthetic(e) && focusPkg != nil && e.Caller.Func.Pkg.Pkg.Path() == focusPkg.Path() {
+                fromFocused = true
+                break
+            }
+        }
+        toFocused := false
+        for _, e := range callee.Out {
+            if !isSynthetic(e) && focusPkg != nil && e.Callee.Func.Pkg.Pkg.Path() == focusPkg.Path() {
+                toFocused = true
+                break
+            }
+        }
+        return fromFocused && toFocused
+    }
 
-	var inLimits = func(node *callgraph.Node) bool {
-	    if node == nil || node.Func == nil || node.Func.Pkg == nil || node.Func.Pkg.Pkg == nil {
-	        return false
-	    }
-	    pkgPath := node.Func.Pkg.Pkg.Path()
-	    for _, p := range a.opts.limit {
-	        if strings.Contains(pkgPath, p) {
-	            return true
-	        }
-	    }
-	    return false
-	}
+    var inIncludes = func(node *callgraph.Node) bool {
+        if node == nil || node.Func == nil || node.Func.Pkg == nil || node.Func.Pkg.Pkg == nil {
+            return false
+        }
+        pkgPath := node.Func.Pkg.Pkg.Path()
+        for _, p := range a.opts.include {
+            if strings.HasPrefix(pkgPath, p) { return true }
+        }
+        return false
+    }
 
-	var inIgnores = func(node *callgraph.Node) bool {
-	    if node == nil || node.Func == nil || node.Func.Pkg == nil || node.Func.Pkg.Pkg == nil {
-	        return false
-	    }
-	    pkgPath := node.Func.Pkg.Pkg.Path()
-	    for _, p := range a.opts.ignore {
-	        if strings.Contains(pkgPath, p) {
-	            return true
-	        }
-	    }
-	    return false
-	}
+    var inLimits = func(node *callgraph.Node) bool {
+        if node == nil || node.Func == nil || node.Func.Pkg == nil || node.Func.Pkg.Pkg == nil {
+            return false
+        }
+        pkgPath := node.Func.Pkg.Pkg.Path()
+        for _, p := range a.opts.limit {
+            if strings.Contains(pkgPath, p) { return true }
+        }
+        return false
+    }
 
-	// Traverse callgraph and populate nodes/edges
-	for _, n := range a.callgraph.Nodes {
-		for _, e := range n.Out {
-			caller := e.Caller
-			callee := e.Callee
+    var inIgnores = func(node *callgraph.Node) bool {
+        if node == nil || node.Func == nil || node.Func.Pkg == nil || node.Func.Pkg.Pkg == nil {
+            return false
+        }
+        pkgPath := node.Func.Pkg.Pkg.Path()
+        for _, p := range a.opts.ignore {
+            if strings.Contains(pkgPath, p) { return true }
+        }
+        return false
+    }
 
-			if isSynthetic(e) {
-				continue
-			}
-			
-			if a.opts.nostd && (inStd(caller) || inStd(callee)) {
-				continue
-			}
-			
-			// Also filter internal runtime packages when nostd is true
-			if a.opts.nostd {
-			    var callerPath, calleePath string
-			    if caller != nil && caller.Func != nil && caller.Func.Pkg != nil && caller.Func.Pkg.Pkg != nil {
-			        callerPath = caller.Func.Pkg.Pkg.Path()
-			    }
-			    if callee != nil && callee.Func != nil && callee.Func.Pkg != nil && callee.Func.Pkg.Pkg != nil {
-			        calleePath = callee.Func.Pkg.Pkg.Path()
-			    }
-			    if isInternalPkg(callerPath) || isInternalPkg(calleePath) {
-			        continue
-			    }
-			}
-			if a.opts.nointer {
-			    cObj := caller.Func.Object()
-			    dObj := callee.Func.Object()
-			    if cObj == nil || dObj == nil || !cObj.Exported() || !dObj.Exported() {
-			        continue
-			    }
-			}
-			if len(a.opts.include) > 0 && !(inIncludes(caller) && inIncludes(callee)) {
-				continue
-			}
-			if len(a.opts.limit) > 0 && !(inLimits(caller) || inLimits(callee)) {
-				continue
-			}
-			if len(a.opts.ignore) > 0 && (inIgnores(caller) || inIgnores(callee)) {
-				continue
-			}
-			if focusPkg != nil && !isFocused(e) {
-				continue
-			}
+    // Traverse callgraph and populate nodes/edges
+    for _, n := range a.callgraph.Nodes {
+        for _, e := range n.Out {
+            caller := e.Caller
+            callee := e.Callee
 
-			callerID := fmt.Sprintf("%s", caller.Func)
-			calleeID := fmt.Sprintf("%s", callee.Func)
+            if isSynthetic(e) { continue }
 
-			if _, ok := nodeMap[callerID]; !ok {
-				pos := a.prog.Fset.Position(caller.Func.Pos())
-				nodeMap[callerID] = createJSONNode(caller, pos)
-			}
-			if _, ok := nodeMap[calleeID]; !ok {
-				pos := a.prog.Fset.Position(callee.Func.Pos())
-				nodeMap[calleeID] = createJSONNode(callee, pos)
-			}
+            // depth limit: if enabled, require both endpoints within allowed depth
+            if a.opts.maxDep > 0 {
+                dc, okc := depthMap[caller]
+                dd, okd := depthMap[callee]
+                // If no depth computed (disconnected from roots), treat as beyond limit
+                if !okc || !okd || dc > a.opts.maxDep || dd > a.opts.maxDep { continue }
+            }
 
-			// Create DOT nodes
-			dFromID := sanitizeMermaidID(callerID)
-			dToID := sanitizeMermaidID(calleeID)
-			if _, exists := dotNodes[dFromID]; !exists {
-				dotNodes[dFromID] = g.Node(dFromID)
-			}
-			if _, exists := dotNodes[dToID]; !exists {
-				dotNodes[dToID] = g.Node(dToID)
-			}
-			g.Edge(dotNodes[dFromID], dotNodes[dToID])
+            if a.opts.nostd && (inStd(caller) || inStd(callee)) { continue }
+            if a.opts.nostd {
+                var callerPath, calleePath string
+                if caller != nil && caller.Func != nil && caller.Func.Pkg != nil && caller.Func.Pkg.Pkg != nil { callerPath = caller.Func.Pkg.Pkg.Path() }
+                if callee != nil && callee.Func != nil && callee.Func.Pkg != nil && callee.Func.Pkg.Pkg != nil { calleePath = callee.Func.Pkg.Pkg.Path() }
+                if isInternalPkg(callerPath) || isInternalPkg(calleePath) { continue }
+            }
+            if a.opts.nointer {
+                cObj := caller.Func.Object()
+                dObj := callee.Func.Object()
+                if cObj == nil || dObj == nil || !cObj.Exported() || !dObj.Exported() { continue }
+            }
+            if len(a.opts.include) > 0 && !(inIncludes(caller) && inIncludes(callee)) { continue }
+            if len(a.opts.limit) > 0 && !(inLimits(caller) && inLimits(callee)) { continue }
+            if len(a.opts.ignore) > 0 && (inIgnores(caller) || inIgnores(callee)) { continue }
+            if focusPkg != nil && !isFocused(e) { continue }
 
-			edgeID := fmt.Sprintf("%s->%s", callerID, calleeID)
-			if _, exists := edgeMap[edgeID]; !exists {
-				pos := a.prog.Fset.Position(e.Pos())
-				edgeMap[edgeID] = &MCPCallgraphEdge{
-					Caller:    callerID,
-					Callee:    calleeID,
-					File:      pos.Filename,
-					Line:      pos.Line,
-					Synthetic: isSynthetic(e),
-				}
-			}
-		}
-	}
+            callerID := fmt.Sprintf("%s", caller.Func)
+            calleeID := fmt.Sprintf("%s", callee.Func)
 
-	// Build Mermaid flowchart text
-	var sb strings.Builder
-	// Direction: Left-to-Right (LR). Could be configurable.
-	sb.WriteString("flowchart LR\n")
+            if _, ok := nodeMap[callerID]; !ok {
+                pos := a.prog.Fset.Position(caller.Func.Pos())
+                nodeMap[callerID] = createJSONNode(caller, pos)
+            }
+            if _, ok := nodeMap[calleeID]; !ok {
+                pos := a.prog.Fset.Position(callee.Func.Pos())
+                nodeMap[calleeID] = createJSONNode(callee, pos)
+            }
 
-	// Determine grouping options
-	hasPkg := false
-	hasType := false
-	for _, g := range a.opts.group {
-		if g == "pkg" {
-			hasPkg = true
-		}
-		if g == "type" {
-			hasType = true
-		}
-	}
+            // Create DOT nodes
+            dFromID := callerID
+            dToID := calleeID
+            if _, exists := dotNodes[dFromID]; !exists { dotNodes[dFromID] = g.Node(dFromID) }
+            if _, exists := dotNodes[dToID]; !exists { dotNodes[dToID] = g.Node(dToID) }
+            g.Edge(dotNodes[dFromID], dotNodes[dToID])
 
-	// Helper to write a single node line and its file:line comment
-	writeNode := func(id string, n *MCPCallgraphNode) {
-		mid := sanitizeMermaidID(id)
-		label := fmt.Sprintf("%s<br/>%s:%d", n.Func, n.File, n.Line)
-		sb.WriteString(fmt.Sprintf("%s[%q]\n", mid, label))
-		// Append relative path as a Mermaid comment
-		relPath := "./"
-		if n.File != "" {
-			relPath = "./" + n.File
-		}
-		sb.WriteString(fmt.Sprintf("%%%% %s\n", relPath))
-	}
+            edgeID := fmt.Sprintf("%s->%s", callerID, calleeID)
+            if _, exists := edgeMap[edgeID]; !exists {
+                pos := a.prog.Fset.Position(e.Pos())
+                edgeMap[edgeID] = &MCPCallgraphEdge{Caller: callerID, Callee: calleeID, File: pos.Filename, Line: pos.Line, Synthetic: isSynthetic(e)}
+            }
+        }
+    }
 
-	if hasPkg && hasType {
-		// Nested grouping: pkg -> type -> nodes
-		nested := make(map[string]map[string][]string)
-		for id, n := range nodeMap {
-			pkg := n.PackagePath
-			typ := "func"
-			if n.ReceiverType != nil && *n.ReceiverType != "" {
-				typ = *n.ReceiverType
-			}
-			if _, ok := nested[pkg]; !ok {
-				nested[pkg] = make(map[string][]string)
-			}
-			nested[pkg][typ] = append(nested[pkg][typ], id)
-		}
-		for pkg, typeMap := range nested {
-			// Subgraph per package
-			sb.WriteString(fmt.Sprintf("subgraph %q\n", "pkg:"+pkg))
-			for typ, ids := range typeMap {
-				// Subgraph per type within package
-				sb.WriteString(fmt.Sprintf("subgraph %q\n", "type:"+typ))
-				for _, id := range ids {
-					writeNode(id, nodeMap[id])
-				}
-				sb.WriteString("end\n")
-			}
-			sb.WriteString("end\n")
-		}
-	} else if hasPkg {
-		// Group by package only
-		groups := make(map[string][]string)
-		for id, n := range nodeMap {
-			groups[n.PackagePath] = append(groups[n.PackagePath], id)
-		}
-		for pkg, ids := range groups {
-			sb.WriteString(fmt.Sprintf("subgraph %q\n", "pkg:"+pkg))
-			for _, id := range ids {
-				writeNode(id, nodeMap[id])
-			}
-			sb.WriteString("end\n")
-		}
-	} else if hasType {
-		// Group by type (receiver) only
-		groups := make(map[string][]string)
-		for id, n := range nodeMap {
-			typ := "func"
-			if n.ReceiverType != nil && *n.ReceiverType != "" {
-				typ = *n.ReceiverType
-			}
-			groups[typ] = append(groups[typ], id)
-		}
-		for typ, ids := range groups {
-			sb.WriteString(fmt.Sprintf("subgraph %q\n", "type:"+typ))
-			for _, id := range ids {
-				writeNode(id, nodeMap[id])
-			}
-			sb.WriteString("end\n")
-		}
-	} else {
-		// No grouping, declare all nodes at top level
-		for id, n := range nodeMap {
-			writeNode(id, n)
-		}
-	}
+    // Build Mermaid flowchart text
+    var sb strings.Builder
+    // Direction: Left-to-Right (LR). Could be configurable.
+    sb.WriteString("flowchart LR\n")
 
-	// Declare edges
-	for _, ed := range edgeMap {
-		from := sanitizeMermaidID(ed.Caller)
-		to := sanitizeMermaidID(ed.Callee)
-		sb.WriteString(fmt.Sprintf("%s --> %s\n", from, to))
-	}
+    // Numeric compact IDs
+    idIndex := make(map[string]int)
+    nextID := 1
+    resolveID := func(s string) string {
+        if v, ok := idIndex[s]; ok { return fmt.Sprintf("N%d", v) }
+        idIndex[s] = nextID
+        nextID++
+        return fmt.Sprintf("N%d", idIndex[s])
+    }
 
-	stats.NodeCount = len(nodeMap)
-	stats.EdgeCount = len(edgeMap)
+    // Determine grouping options
+    hasPkg := false
+    hasType := false
+    for _, g := range a.opts.group {
+        if g == "pkg" { hasPkg = true }
+        if g == "type" { hasType = true }
+    }
 
-	return sb.String(), stats, nil
+    // Helper to write a single node line and its file:line comment
+    writeNode := func(id string, n *MCPCallgraphNode) {
+        mid := resolveID(id)
+        label := fmt.Sprintf("%s<br/>%s:%d", n.Func, n.File, n.Line)
+        sb.WriteString(fmt.Sprintf("%s[%q]\n", mid, label))
+    }
+
+    if hasPkg && hasType {
+        // Nested grouping: pkg -> type -> nodes
+        nested := make(map[string]map[string][]string)
+        for id, n := range nodeMap {
+            pkg := n.PackagePath
+            typ := "func"
+            if n.ReceiverType != nil && *n.ReceiverType != "" { typ = *n.ReceiverType }
+            if _, ok := nested[pkg]; !ok { nested[pkg] = make(map[string][]string) }
+            nested[pkg][typ] = append(nested[pkg][typ], id)
+        }
+        for pkg, typeMap := range nested {
+            // Subgraph per package
+            sb.WriteString(fmt.Sprintf("subgraph %q\n", "pkg:"+pkg))
+            for typ, ids := range typeMap {
+                // Subgraph per type within package
+                sb.WriteString(fmt.Sprintf("subgraph %q\n", "type:"+typ))
+                for _, id := range ids { writeNode(id, nodeMap[id]) }
+                sb.WriteString("end\n")
+            }
+            sb.WriteString("end\n")
+        }
+    } else if hasPkg {
+        // Group by package only
+        groups := make(map[string][]string)
+        for id, n := range nodeMap { groups[n.PackagePath] = append(groups[n.PackagePath], id) }
+        for pkg, ids := range groups {
+            sb.WriteString(fmt.Sprintf("subgraph %q\n", "pkg:"+pkg))
+            for _, id := range ids { writeNode(id, nodeMap[id]) }
+            sb.WriteString("end\n")
+        }
+    } else if hasType {
+        // Group by type (receiver) only
+        groups := make(map[string][]string)
+        for id, n := range nodeMap {
+            typ := "func"
+            if n.ReceiverType != nil && *n.ReceiverType != "" { typ = *n.ReceiverType }
+            groups[typ] = append(groups[typ], id)
+        }
+        for typ, ids := range groups {
+            sb.WriteString(fmt.Sprintf("subgraph %q\n", "type:"+typ))
+            for _, id := range ids { writeNode(id, nodeMap[id]) }
+            sb.WriteString("end\n")
+        }
+    } else {
+        // No grouping, declare all nodes at top level
+        for id, n := range nodeMap { writeNode(id, n) }
+    }
+
+    // Declare edges
+    for _, ed := range edgeMap {
+        from := resolveID(ed.Caller)
+        to := resolveID(ed.Callee)
+        sb.WriteString(fmt.Sprintf("%s --> %s\n", from, to))
+    }
+
+    stats.NodeCount = len(nodeMap)
+    stats.EdgeCount = len(edgeMap)
+
+    return sb.String(), stats, nil
 }
 
 // sanitizeMermaidID creates a safe identifier for Mermaid nodes
@@ -936,34 +943,30 @@ func generateMermaidTraversal(a *analysis, symbol string, direction string) (str
 		return false
 	}
 	passEdge := func(e *callgraph.Edge) bool {
-		if isSynthetic(e) {
-			return false
-		}
+		if e == nil { return false }
+		if isSynthetic(e) { return false }
 		caller := e.Caller
 		callee := e.Callee
-		if a.opts.nostd && (inStd(caller) || inStd(callee)) {
-			return false
+		if caller == nil || callee == nil || caller.Func == nil || callee.Func == nil { return false }
+		if a.opts.nostd && (inStd(caller) || inStd(callee)) { return false }
+		if a.opts.nostd {
+			var cPath, dPath string
+			if caller.Func.Pkg != nil && caller.Func.Pkg.Pkg != nil { cPath = caller.Func.Pkg.Pkg.Path() }
+			if callee.Func != nil && callee.Func.Pkg != nil && callee.Func.Pkg.Pkg != nil { dPath = callee.Func.Pkg.Pkg.Path() }
+			if (cPath != "" && isInternalPkg(cPath)) || (dPath != "" && isInternalPkg(dPath)) { return false }
 		}
-		if a.opts.nostd && (isInternalPkg(caller.Func.Pkg.Pkg.Path()) || isInternalPkg(callee.Func.Pkg.Pkg.Path())) {
-			return false
+		if a.opts.nointer {
+			cObj := caller.Func.Object(); dObj := callee.Func.Object()
+			if cObj == nil || dObj == nil || !cObj.Exported() || !dObj.Exported() { return false }
 		}
-		if a.opts.nointer && (!caller.Func.Object().Exported() || !callee.Func.Object().Exported()) {
-			return false
-		}
-		if len(a.opts.include) > 0 && !(inIncludes(caller) && inIncludes(callee)) {
-			return false
-		}
-		if len(a.opts.limit) > 0 && !(inLimits(caller) || inLimits(callee)) {
-			return false
-		}
-		if len(a.opts.ignore) > 0 && (inIgnores(caller) || inIgnores(callee)) {
-			return false
-		}
+		if len(a.opts.include) > 0 && !(inIncludes(caller) && inIncludes(callee)) { return false }
+		if len(a.opts.limit) > 0 && !(inLimits(caller) && inLimits(callee)) { return false }
+		if len(a.opts.ignore) > 0 && (inIgnores(caller) || inIgnores(callee)) { return false }
 		if focusPkg != nil {
-			// keep only edges touching focus
-			if !(caller.Func.Pkg.Pkg.Path() == focusPkg.Path() || callee.Func.Pkg.Pkg.Path() == focusPkg.Path()) {
-				return false
-			}
+			var cPath, dPath string
+			if caller.Func.Pkg != nil && caller.Func.Pkg.Pkg != nil { cPath = caller.Func.Pkg.Pkg.Path() }
+			if callee.Func.Pkg != nil && callee.Func.Pkg.Pkg != nil { dPath = callee.Func.Pkg.Pkg.Path() }
+			if !(cPath == focusPkg.Path() || dPath == focusPkg.Path()) { return false }
 		}
 		return true
 	}
@@ -1060,23 +1063,31 @@ func generateMermaidTraversal(a *analysis, symbol string, direction string) (str
 	var sb strings.Builder
 	sb.WriteString("flowchart LR\n")
 
-	// Determine grouping
+	// Numeric compact IDs (traversal)
+	idIndex := make(map[string]int)
+	nextID := 1
+	resolveID := func(s string) string {
+	    if v, ok := idIndex[s]; ok { return fmt.Sprintf("N%d", v) }
+	    idIndex[s] = nextID
+	    nextID++
+	    return fmt.Sprintf("N%d", idIndex[s])
+	}
+
+	// Determine grouping options
 	hasPkg := false
 	hasType := false
 	for _, g := range a.opts.group {
-		if g == "pkg" { hasPkg = true }
-		if g == "type" { hasType = true }
+		if g == "pkg" {
+			hasPkg = true
+		}
+		if g == "type" {
+			hasType = true
+		}
 	}
 	writeNode := func(id string, n *MCPCallgraphNode) {
-		mid := sanitizeMermaidID(id)
+		mid := resolveID(id)
 		label := fmt.Sprintf("%s<br/>%s:%d", n.Func, n.File, n.Line)
 		sb.WriteString(fmt.Sprintf("%s[%q]\n", mid, label))
-		// Append relative path as a Mermaid comment
-		relPath := "./"
-		if n.File != "" {
-			relPath = "./" + n.File
-		}
-		sb.WriteString(fmt.Sprintf("%%%% %s\n", relPath))
 	}
 	if hasPkg && hasType {
 		nested := make(map[string]map[string][]string)
@@ -1092,20 +1103,28 @@ func generateMermaidTraversal(a *analysis, symbol string, direction string) (str
 			nested[pkg][typ] = append(nested[pkg][typ], id)
 		}
 		for pkg, typeMap := range nested {
+			// Subgraph per package
 			sb.WriteString(fmt.Sprintf("subgraph %q\n", "pkg:"+pkg))
 			for typ, ids := range typeMap {
+				// Subgraph per type within package
 				sb.WriteString(fmt.Sprintf("subgraph %q\n", "type:"+typ))
-				for _, id := range ids { writeNode(id, nodeMap[id]) }
+				for _, id := range ids {
+					writeNode(id, nodeMap[id])
+				}
 				sb.WriteString("end\n")
 			}
 			sb.WriteString("end\n")
 		}
 	} else if hasPkg {
 		groups := make(map[string][]string)
-		for id, n := range nodeMap { groups[n.PackagePath] = append(groups[n.PackagePath], id) }
+		for id, n := range nodeMap {
+			groups[n.PackagePath] = append(groups[n.PackagePath], id)
+		}
 		for pkg, ids := range groups {
 			sb.WriteString(fmt.Sprintf("subgraph %q\n", "pkg:"+pkg))
-			for _, id := range ids { writeNode(id, nodeMap[id]) }
+			for _, id := range ids {
+				writeNode(id, nodeMap[id])
+			}
 			sb.WriteString("end\n")
 		}
 	} else if hasType {
@@ -1119,15 +1138,19 @@ func generateMermaidTraversal(a *analysis, symbol string, direction string) (str
 		}
 		for typ, ids := range groups {
 			sb.WriteString(fmt.Sprintf("subgraph %q\n", "type:"+typ))
-			for _, id := range ids { writeNode(id, nodeMap[id]) }
+			for _, id := range ids {
+				writeNode(id, nodeMap[id])
+			}
 			sb.WriteString("end\n")
 		}
 	} else {
-		for id, n := range nodeMap { writeNode(id, n) }
+		for id, n := range nodeMap {
+			writeNode(id, n)
+		}
 	}
 	for _, ed := range edgeMap {
-		from := sanitizeMermaidID(ed.Caller)
-		to := sanitizeMermaidID(ed.Callee)
+		from := resolveID(ed.Caller)
+		to := resolveID(ed.Callee)
 		sb.WriteString(fmt.Sprintf("%s --> %s\n", from, to))
 	}
 
